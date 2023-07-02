@@ -4,15 +4,27 @@ use std::{
     net::TcpStream,
     sync::{mpsc, Arc, Mutex},
     thread::{spawn, JoinHandle},
-    vec, fs, fmt::Display,
 };
+
+use error::CustomError;
 pub type Res<T> = Result<T, Box<dyn Error>>;
 pub type Null = Res<()>;
 pub type Job = Box<dyn Fn(Vec<u8>) -> Res<Vec<u8>> + Send + 'static>;
+pub type Work = Arc<Mutex<mpsc::Receiver<TaskPair>>>;
+pub type Control = Arc<Mutex<mpsc::Receiver<ControlPrompt>>>;
+const MAX_THREADS: usize = 32;
+
+pub mod error;
+pub mod primitives;
+
+pub enum ControlPrompt {
+    Terminate
+}
 
 pub struct Threadpool {
-    handles: Vec<Worker>,
+    handles: Vec<(Worker, mpsc::Sender<ControlPrompt>)>,
     tx: mpsc::Sender<TaskPair>,
+    rx: Work,
 }
 
 impl Threadpool {
@@ -21,19 +33,49 @@ impl Threadpool {
         let c = mpsc::channel();
         let rx = Arc::new(Mutex::new(c.1));
         for _i in 0..n {
-            w.push(Worker::new(rx.clone()));
+            let ctr = mpsc::channel();
+            w.push((Worker::new(rx.clone(), Arc::new(Mutex::new(ctr.1))), ctr.0));
+
         }
 
         Self {
             handles: w,
             tx: c.0,
+            rx: rx.clone(),
         }
 
         // todo!()
     }
 
+    pub fn push(&mut self) -> Null{
+        if self.handles.len() == MAX_THREADS {
+            return Err(Box::new(CustomError::Full));
+        }
+        let ctr = mpsc::channel();
+        self.handles.push((Worker::new(self.rx.clone(), Arc::new(Mutex::new(ctr.1))), ctr.0));
+
+        Ok(())
+    }
+
+    pub fn pop(&mut self) -> Null{
+        let j = self.handles.pop().unwrap();
+        j.1.send(ControlPrompt::Terminate)?;
+        j.0.retire();
+        Ok(())
+    }
+
     pub fn task(&self, t: TaskPair) -> Null {
         Ok(self.tx.send(t)?)
+    }
+
+    pub fn retire(self) -> Null{
+        for t in self.handles {
+            t.1.send(ControlPrompt::Terminate)?;
+            t.0.retire();
+
+        }
+
+        Ok(())
     }
 }
 
@@ -54,11 +96,17 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 
-type Work = Arc<Mutex<mpsc::Receiver<TaskPair>>>;
 impl Worker {
-    fn new(rx: Work) -> Self {
+    fn new(rx: Work, ctrl: Control) -> Self {
         Self {
             thread: spawn(move || loop {
+                // check for control
+                let ctr = ctrl.lock().unwrap().try_recv();
+                if let Ok(pr) = ctr {
+                    match pr {
+                        ControlPrompt::Terminate => {break;}
+                    }
+                }
                 // acquire the taskpair
                 let mut tp = rx.lock().unwrap().recv().unwrap();
 
@@ -73,43 +121,12 @@ impl Worker {
                 // write back
                 tp.data.write_all(&out).unwrap();
             }),
+            // ctrl
         }
     }
-}
 
-#[derive(Debug)]
-pub enum CustomError {
-    Absent,
-}
-
-impl Display for CustomError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            Self::Absent => {write!(f, "Primitive absent.")?;}
-        }
-        Ok(())
-    }
-}
-
-impl Error for CustomError {}
-
-pub enum Primitives {
-    FTP,
-}
-
-impl Primitives {
-    pub fn get_job(&self) -> Res<Job> {
-        match &self {
-            Self::FTP => Ok(Box::new(ftp)),
-        }
-    }
-}
-
-fn ftp(v: Vec<u8>) -> Res<Vec<u8>> {
-    let path = v.iter().map(|u| *u as char).collect::<String>();
-    println!("FTP request for {path} received.");
-    match fs::read(path) {
-        Ok(x) => Ok(x),
-        Err(e) => Ok(e.to_string().as_bytes().to_vec()),
+    fn retire(self) {
+        self.thread.join().unwrap();
+        // self.thread.thread()
     }
 }
