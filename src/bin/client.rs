@@ -5,7 +5,7 @@ use std::{
 
 use socketry::*;
 
-fn main() -> MyNull {
+fn main() -> Null {
     let mut stream = connectsock("127.0.0.1:7777")?;
     let mut inc = "".to_string();
     io::stdin().read_line(&mut inc)?;
@@ -19,6 +19,6 @@ fn main() -> MyNull {
     Ok(())
 }
 
-fn connectsock(addr: &str) -> MyResult<TcpStream> {
+fn connectsock(addr: &str) -> Res<TcpStream> {
     Ok(TcpStream::connect(addr)?)
 }
