@@ -2,15 +2,14 @@ use std::fs;
 
 use crate::{Job, Res};
 
-
 pub enum Primitives {
-    FTP,
+    FileShare,
 }
 
 impl Primitives {
     pub fn get_job(&self) -> Res<Job> {
-        match &self {
-            Self::FTP => Ok(Box::new(ftp)),
+        match self {
+            Self::FileShare => Ok(Box::new(ftp)),
         }
     }
 }

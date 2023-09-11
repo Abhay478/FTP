@@ -6,19 +6,29 @@ use std::{
     thread::{spawn, JoinHandle},
 };
 
-use error::CustomError;
+use error::SocketryError;
+
+/// Standard result shortcuts.
 pub type Res<T> = Result<T, Box<dyn Error>>;
 pub type Null = Res<()>;
+
+/// Any function that deals in bytestreams.
 pub type Job = Box<dyn Fn(Vec<u8>) -> Res<Vec<u8>> + Send + 'static>;
+
+/// Channel through which the threadpool receives a Job.
 pub type Work = Arc<Mutex<mpsc::Receiver<TaskPair>>>;
+
+/// Channel through which the threadpool receives a Control message.
+/// Disseminated during threadpool inin.
 pub type Control = Arc<Mutex<mpsc::Receiver<ControlPrompt>>>;
 const MAX_THREADS: usize = 32;
 
 pub mod error;
 pub mod primitives;
 
+/// Only one so far...
 pub enum ControlPrompt {
-    Terminate
+    Terminate,
 }
 
 pub struct Threadpool {
@@ -29,13 +39,15 @@ pub struct Threadpool {
 
 impl Threadpool {
     pub fn new(n: usize) -> Self {
-        let mut w = vec![];
-        let c = mpsc::channel();
-        let rx = Arc::new(Mutex::new(c.1));
+        let mut w = vec![]; // vec
+        let c = mpsc::channel(); // channel
+        let rx = Arc::new(Mutex::new(c.1)); // put rx in arc-mutex
+        
+        // For some reason, I've made separate control channels for each thread in the pool.
+        // Might change to a single broadcast channel.
         for _i in 0..n {
             let ctr = mpsc::channel();
             w.push((Worker::new(rx.clone(), Arc::new(Mutex::new(ctr.1))), ctr.0));
-
         }
 
         Self {
@@ -47,17 +59,21 @@ impl Threadpool {
         // todo!()
     }
 
-    pub fn push(&mut self) -> Null{
+    /// Create a new thread.
+    pub fn push(&mut self) -> Null {
         if self.handles.len() == MAX_THREADS {
-            return Err(Box::new(CustomError::Full));
+            return Err(Box::new(SocketryError::Full));
         }
         let ctr = mpsc::channel();
-        self.handles.push((Worker::new(self.rx.clone(), Arc::new(Mutex::new(ctr.1))), ctr.0));
+        self.handles.push((
+            Worker::new(self.rx.clone(), Arc::new(Mutex::new(ctr.1))),
+            ctr.0,
+        ));
 
         Ok(())
     }
 
-    pub fn pop(&mut self) -> Null{
+    pub fn pop(&mut self) -> Null {
         let j = self.handles.pop().unwrap();
         j.1.send(ControlPrompt::Terminate)?;
         j.0.retire();
@@ -68,11 +84,10 @@ impl Threadpool {
         Ok(self.tx.send(t)?)
     }
 
-    pub fn retire(self) -> Null{
+    pub fn retire(self) -> Null {
         for t in self.handles {
             t.1.send(ControlPrompt::Terminate)?;
             t.0.retire();
-
         }
 
         Ok(())
@@ -86,9 +101,13 @@ pub struct TaskPair {
 
 impl TaskPair {
     pub fn new<F>(data: TcpStream, func: F) -> Self
-    where F: Fn(Vec<u8>) -> Res<Vec<u8>> + Send + 'static
+    where
+        F: Fn(Vec<u8>) -> Res<Vec<u8>> + Send + 'static,
     {
-        Self { func: Box::new(func), data }
+        Self {
+            func: Box::new(func),
+            data,
+        }
     }
 }
 
@@ -102,9 +121,13 @@ impl Worker {
             thread: spawn(move || loop {
                 // check for control
                 let ctr = ctrl.lock().unwrap().try_recv();
+
+                // If there's a ControlPrompt from on high, do what it says.
                 if let Ok(pr) = ctr {
                     match pr {
-                        ControlPrompt::Terminate => {break;}
+                        ControlPrompt::Terminate => {
+                            break;
+                        }
                     }
                 }
                 // acquire the taskpair
